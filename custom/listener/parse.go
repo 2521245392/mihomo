@@ -1,0 +1,72 @@
+package listener
+
+import (
+	"fmt"
+
+	"github.com/metacubex/mihomo/common/structure"
+	C "github.com/metacubex/mihomo/constant"
+	IN "github.com/metacubex/mihomo/listener/inbound"
+)
+
+func ParseListener(mapping map[string]any) (C.InboundListener, error) {
+	decoder := structure.NewDecoder(structure.Option{TagName: "inbound", WeaklyTypedInput: true, KeyReplacer: structure.DefaultKeyReplacer})
+	proxyType, existType := mapping["type"].(string)
+	if !existType {
+		return nil, fmt.Errorf("missing type")
+	}
+
+	var (
+		listener C.InboundListener
+		err      error
+	)
+	switch proxyType {
+	case "socks":
+		socksOption := &IN.SocksOption{UDP: true}
+		err = decoder.Decode(mapping, socksOption)
+		if err != nil {
+			return nil, err
+		}
+		listener, err = IN.NewSocks(socksOption)
+	case "http":
+		httpOption := &IN.HTTPOption{}
+		err = decoder.Decode(mapping, httpOption)
+		if err != nil {
+			return nil, err
+		}
+		listener, err = IN.NewHTTP(httpOption)
+	case "tproxy":
+		tproxyOption := &IN.TProxyOption{UDP: true}
+		err = decoder.Decode(mapping, tproxyOption)
+		if err != nil {
+			return nil, err
+		}
+		listener, err = IN.NewTProxy(tproxyOption)
+	case "redir":
+		redirOption := &IN.RedirOption{}
+		err = decoder.Decode(mapping, redirOption)
+		if err != nil {
+			return nil, err
+		}
+		listener, err = IN.NewRedir(redirOption)
+	case "mixed":
+		mixedOption := &IN.MixedOption{UDP: true}
+		err = decoder.Decode(mapping, mixedOption)
+		if err != nil {
+			return nil, err
+		}
+		listener, err = IN.NewMixed(mixedOption)
+	case "tun":
+		tunOption := &IN.TunOption{
+			Stack:     C.TunGvisor,
+			DNSHijack: []string{"0.0.0.0:53"}, // default hijack all dns query
+		}
+		err = decoder.Decode(mapping, tunOption)
+		if err != nil {
+			return nil, err
+		}
+		listener, err = IN.NewTun(tunOption)
+	default:
+		return nil, fmt.Errorf("unsupport proxy type: %s", proxyType)
+	}
+	return listener, err
+}

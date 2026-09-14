@@ -1,0 +1,139 @@
+﻿name: Auto Sync, Build and Release
+
+on:
+  schedule:
+    # 每天 UTC 0:00 和 12:00（北京时间 8:00 和 20:00）自动巡检
+    - cron: '0 0,12 * * *'
+  push:
+    branches:
+      - my-slim
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Custom Configs
+        uses: actions/checkout@v4
+        with:
+          ref: my-slim
+          path: custom-repo
+
+      - name: Checkout Official Mihomo Alpha
+        uses: actions/checkout@v4
+        with:
+          repository: MetaCubeX/mihomo
+          ref: Alpha
+          path: mihomo-source
+          fetch-depth: 0
+
+      - name: Dynamic Prune Protocols & Apply Custom Files
+        run: |
+          cd mihomo-source
+
+          # 1. 出站协议：删除除 vless、hysteria2 与必要基础文件之外的所有出站实现
+          cd adapter/outbound
+          find . -maxdepth 1 -name "*.go" \
+            ! -name "vless.go" \
+            ! -name "hysteria2.go" \
+            ! -name "base*.go" \
+            ! -name "direct.go" \
+            ! -name "dns.go" \
+            ! -name "reject.go" \
+            ! -name "rematch.go" \
+            ! -name "singmux.go" \
+            ! -name "util.go" \
+            -delete
+          cd ../..
+
+          # 2. 入站协议：删除冗余的私有监听器文件，保留混合代理与核心网络栈
+          cd listener/inbound
+          rm -f anytls*.go hysteria2*.go jls*.go kcptun*.go mekya*.go mieru*.go mkcp*.go \
+                restls*.go shadowquic*.go shadowsocks*.go shadowtls*.go snell*.go sudoku*.go \
+                tlsmirror*.go trojan*.go trusttunnel*.go tuic*.go tunnel*.go vless*.go vmess*.go
+          cd ../..
+
+          # 3. 覆盖写入你的 4 个核心定制文件
+          cp -rf ../custom-repo/custom/* ./
+
+          # 4. 自动剔除断开的依赖
+          go mod tidy
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
+          cache-dependency-path: mihomo-source/go.sum
+
+      - name: Fetch Upstream Latest Release Tag
+        run: |
+          UPSTREAM_TAG=$(curl -s https://api.github.com/repos/MetaCubeX/mihomo/releases/latest | jq -r .tag_name)
+          if [ -z "$UPSTREAM_TAG" ] || [ "$UPSTREAM_TAG" = "null" ]; then
+            UPSTREAM_TAG="v1.19.30"
+          fi
+          echo "VERSION=$UPSTREAM_TAG" >> $GITHUB_ENV
+          echo "Target Version: $UPSTREAM_TAG"
+
+      - name: Install UPX
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y upx
+
+      - name: Apply TLS CipherSuites Patch
+        run: |
+          cd mihomo-source
+          go mod download
+          TLS_DIR=$(go list -m -f '{{.Dir}}' github.com/metacubex/tls)
+          chmod -R u+w "$TLS_DIR"
+          TARGET_FILE="$TLS_DIR/handshake_client.go"
+          if [ -f "$TARGET_FILE" ]; then
+            sed -i 's/defaultCipherSuitesTLS13NoAES/defaultCipherSuitesTLS13/g' "$TARGET_FILE"
+            echo "Successfully patched: $TARGET_FILE"
+          else
+            echo "Target TLS file not found!"
+            exit 1
+          fi
+
+      - name: Build Static Linux ARM64 Binary
+        run: |
+          cd mihomo-source
+          BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          VER="${{ env.VERSION }}"
+          
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -v \
+            -tags "without_gvisor no_tailscale no_zerotier no_fake_tcp" \
+            -trimpath \
+            -ldflags="-extldflags --static -s -w -buildid= \
+              -X github.com/metacubex/mihomo/constant.Version=${VER} \
+              -X github.com/metacubex/mihomo/constant.BuildTime=${BUILD_TIME}" \
+            -o ../mihomo-linux-arm64 .
+
+      - name: Compress with UPX
+        run: |
+          upx --best --lzma -f -o mihomo mihomo-linux-arm64
+          ls -lh mihomo
+
+      - name: Publish to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.VERSION }}
+          name: "Mihomo Slim ${{ env.VERSION }}"
+          body: "Automated slim build (VLESS + Hy2 only, UPX compressed) sync with upstream ${{ env.VERSION }}."
+          files: mihomo
+          fail_on_already_exists: false
+
+      - name: Notify Telegram on Failure
+        if: failure()
+        run: |
+          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          TEXT="🚨 *Mihomo 自动化构建失败告警* %0A%0A*分支:* \`my-slim\`%0A*事件:* \`${{ github.event_name }}\`%0A*原因可能:* 官方核心接口发生重大重构或 Go 编译报错。%0A%0A👉 [点击查看 Actions 报错详情]($RUN_URL)"
+          
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TG_BOT_TOKEN }}/sendMessage" \
+            -d "chat_id=${{ secrets.TG_CHAT_ID }}" \
+            -d "parse_mode=Markdown" \
+            -d "text=$TEXT"
