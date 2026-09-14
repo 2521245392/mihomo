@@ -2,7 +2,6 @@
 
 on:
   schedule:
-    # 每天 UTC 0:00 和 12:00（北京时间 8:00 和 20:00）自动巡检
     - cron: '0 0,12 * * *'
   push:
     branches:
@@ -35,7 +34,7 @@ jobs:
         run: |
           cd mihomo-source
 
-          # 1. 出站协议：删除除 vless、hysteria2 与必要基础文件之外的所有出站实现
+          # 1. 出站协议裁剪
           cd adapter/outbound
           find . -maxdepth 1 -name "*.go" \
             ! -name "vless.go" \
@@ -50,14 +49,14 @@ jobs:
             -delete
           cd ../..
 
-          # 2. 入站协议：删除冗余的私有监听器文件，保留混合代理与核心网络栈
+          # 2. 入站协议裁剪
           cd listener/inbound
           rm -f anytls*.go hysteria2*.go jls*.go kcptun*.go mekya*.go mieru*.go mkcp*.go \
                 restls*.go shadowquic*.go shadowsocks*.go shadowtls*.go snell*.go sudoku*.go \
                 tlsmirror*.go trojan*.go trusttunnel*.go tuic*.go tunnel*.go vless*.go vmess*.go
           cd ../..
 
-          # 3. 覆盖写入你的 4 个核心定制文件
+          # 3. 覆盖写入你的所有定制文件（包含 parser.go 与定制版的 update_core.go）
           cp -rf ../custom-repo/custom/* ./
 
           # 4. 自动剔除断开的依赖
@@ -117,6 +116,8 @@ jobs:
         run: |
           upx --best --lzma -f -o mihomo mihomo-linux-arm64
           ls -lh mihomo
+          # 生成版本号文件供更新检测
+          echo "${{ env.VERSION }}" > version.txt
 
       - name: Publish to GitHub Release
         uses: softprops/action-gh-release@v2
@@ -124,7 +125,9 @@ jobs:
           tag_name: ${{ env.VERSION }}
           name: "Mihomo Slim ${{ env.VERSION }}"
           body: "Automated slim build (VLESS + Hy2 only, UPX compressed) sync with upstream ${{ env.VERSION }}."
-          files: mihomo
+          files: |
+            mihomo
+            version.txt
           fail_on_already_exists: false
 
       - name: Notify Telegram on Failure
